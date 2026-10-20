@@ -1,3 +1,5 @@
+## 1.0.4+1 (2026-10-20)
+* Remove jcenter() repositories from android/build.gradle (removed in Gradle 9.0; needed for AGP 9 / Gradle 9.1+ apps)
 ## 1.0.4 (2025-10-14)
 * Fix error parsing 
 ## 1.0.3 (2025-10-01)
