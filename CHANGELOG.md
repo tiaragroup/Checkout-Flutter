@@ -1,3 +1,9 @@
+## 1.0.5+1 (2026-11-05)
+
+* Android: show a loader over the 3DS screen until its sheet appears. Checkout-Android loads the 3DS page hidden and shows the sheet only 5s after it finishes loading, so the app looked stuck.
+* Android: keep the checkout see-through under one loader until `onReady`, then fade it in. The page takes seconds to load and draws its own loader only part way, so after Pay the app looked stuck and then showed two loaders. Both loaders use the GIF Checkout-Android ships.
+* iOS: no `Package.swift`, so Flutter always links Checkout-IOS with CocoaPods. With Swift Package Manager on, Checkout-IOS came in as a package while plugins without package support (such as tap_apple_pay_flutter) still used pods, and both pulled TapCardVlidatorKit-iOS, which failed the link with duplicate symbols. CocoaPods resolves one copy for both. Bring the file back once those plugins support Swift Package Manager.
+
 ## 1.0.5 (2026-10-27)
 
 * iOS: Checkout-IOS 1.0.7. Needs iOS 15.0.

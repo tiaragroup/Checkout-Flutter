@@ -1,13 +1,25 @@
 package com.example.checkout_flutter
 
 import android.app.Activity
+import android.app.Application
+import android.graphics.Color
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageView
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import com.bumptech.glide.Glide
 import company.tap.tapcheckout_android.CheckoutConfiguration
+import company.tap.tapcheckout_android.R as TapR
 import company.tap.tapcheckout_android.TapCheckout
 import company.tap.tapcheckout_android.TapCheckoutStatusDelegate
+import company.tap.tapcheckout_android.threeDsWebview.ThreeDsBottomSheetFragmentButton
+import company.tap.tapcheckout_android.threeDsWebview.ThreeDsWebViewActivityButton
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -28,6 +40,75 @@ class CheckoutFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
 
   /** The view of the checkout that is on screen, if any. */
   private var checkoutView: TapCheckout? = null
+
+  /**
+   * The checkout page takes seconds to load (config request, then the page) and draws its own loader
+   * only part way, so the app looked stuck and then showed two loaders. The checkout is kept see-through
+   * (alpha 0, still laid out and loading) under this loader until onReady, then faded in: one loader.
+   */
+  private var checkoutLoader: View? = null
+
+  /** A 3DS activity created but not started yet, and the loader shown over it until its sheet appears. */
+  private var pendingThreeDs: ThreeDsWebViewActivityButton? = null
+  private var threeDsLoader: View? = null
+
+  /**
+   * Checkout-Android loads the 3DS page in a transparent activity with nothing on screen and shows its
+   * sheet only 5s after the page finished loading, so the app looks stuck. A loader covers that gap.
+   * It is added on start (the SDK calls setContentView after onActivityCreated) and only once, so it
+   * does not come back behind the sheet when the app returns from the background.
+   */
+  private val threeDsWatcher = object : Application.ActivityLifecycleCallbacks {
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+      if (activity !is ThreeDsWebViewActivityButton) return
+      pendingThreeDs = activity
+      activity.supportFragmentManager.registerFragmentLifecycleCallbacks(threeDsSheetWatcher, false)
+    }
+    override fun onActivityStarted(activity: Activity) {
+      if (activity !== pendingThreeDs) return
+      pendingThreeDs = null
+      showThreeDsLoader(activity)
+    }
+    override fun onActivityDestroyed(activity: Activity) {
+      if (pendingThreeDs === activity) pendingThreeDs = null
+      if (threeDsLoader?.context === activity) threeDsLoader = null
+    }
+    override fun onActivityResumed(activity: Activity) {}
+    override fun onActivityPaused(activity: Activity) {}
+    override fun onActivityStopped(activity: Activity) {}
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+  }
+
+  private val threeDsSheetWatcher = object : FragmentManager.FragmentLifecycleCallbacks() {
+    override fun onFragmentStarted(fm: FragmentManager, f: Fragment) {
+      if (f is ThreeDsBottomSheetFragmentButton) hideThreeDsLoader()
+    }
+  }
+
+  /** A dimmed, touch-blocking screen with the loader GIF Checkout-Android ships, so it looks like the SDK's own. */
+  private fun loaderView(activity: Activity): View = FrameLayout(activity).apply {
+    setBackgroundColor(Color.argb(153, 0, 0, 0))
+    isClickable = true
+    val size = (48 * resources.displayMetrics.density).toInt()
+    addView(
+      ImageView(activity).also { Glide.with(activity).asGif().load(TapR.drawable.loader).into(it) },
+      FrameLayout.LayoutParams(size, size, Gravity.CENTER),
+    )
+  }
+
+  private fun showThreeDsLoader(activity: Activity) {
+    val loader = loaderView(activity)
+    activity.addContentView(
+      loader,
+      ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+    )
+    threeDsLoader = loader
+  }
+
+  private fun hideThreeDsLoader() {
+    threeDsLoader?.let { loader -> (loader.parent as? ViewGroup)?.removeView(loader) }
+    threeDsLoader = null
+  }
 
   override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
     channel = MethodChannel(binding.binaryMessenger, "checkout_flutter").also { it.setMethodCallHandler(this) }
@@ -66,13 +147,21 @@ class CheckoutFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
       // A checkout that is still open is replaced by the new one.
       removeCheckoutView()
       val view = TapCheckout(currentActivity)
-      currentActivity.findViewById<ViewGroup>(android.R.id.content).addView(
+      val content = currentActivity.findViewById<ViewGroup>(android.R.id.content)
+      content.addView(
         view,
         ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
       )
-      // The view shows the SDK's loader right away and stays until the flow ends.
+      // The view stays until the flow ends. Not INVISIBLE: the page must keep loading and drawing.
       view.visibility = View.VISIBLE
+      view.alpha = 0f
       checkoutView = view
+      checkoutLoader = loaderView(currentActivity).also {
+        content.addView(
+          it,
+          ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+      }
 
       CheckoutConfiguration.configureWithTapCheckoutDictionary(
         currentActivity,
@@ -105,7 +194,14 @@ class CheckoutFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
       channel?.invokeMethod(method, data?.let { mapOf("data" to it) })
     }
 
-    override fun onCheckoutReady() { send("onReady") }
+    override fun onCheckoutReady() {
+      mainHandler.post {
+        if (checkoutView !== view) return@post
+        hideCheckoutLoader()
+        view.animate().alpha(1f).setDuration(200L)
+      }
+      send("onReady")
+    }
     override fun onCheckoutChargeCreated(data: String) { send("onChargeCreated", data) }
     override fun onCheckoutSuccess(data: String) { send("onSuccess", data, ends = true) }
     override fun onCheckoutError(error: String) { send("onError", error, ends = true) }
@@ -113,26 +209,36 @@ class CheckoutFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
   }
 
   private fun removeCheckoutView() {
+    hideCheckoutLoader()
     checkoutView?.let { view -> (view.parent as? ViewGroup)?.removeView(view) }
     checkoutView = null
+  }
+
+  private fun hideCheckoutLoader() {
+    checkoutLoader?.let { loader -> (loader.parent as? ViewGroup)?.removeView(loader) }
+    checkoutLoader = null
   }
 
   // ActivityAware
 
   override fun onAttachedToActivity(binding: ActivityPluginBinding) {
     activity = binding.activity
+    binding.activity.application.registerActivityLifecycleCallbacks(threeDsWatcher)
   }
 
   override fun onDetachedFromActivityForConfigChanges() {
+    activity?.application?.unregisterActivityLifecycleCallbacks(threeDsWatcher)
     activity = null
   }
 
   override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
     activity = binding.activity
+    binding.activity.application.registerActivityLifecycleCallbacks(threeDsWatcher)
   }
 
   override fun onDetachedFromActivity() {
     removeCheckoutView()
+    activity?.application?.unregisterActivityLifecycleCallbacks(threeDsWatcher)
     activity = null
   }
 }
